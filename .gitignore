@@ -30,3 +30,6 @@ backup_before_referable/
 
 # Logs
 *.log
+
+!models/
+!models/best_referable_model.keras
