@@ -1,0 +1,32 @@
+﻿# Virtual environments
+.venv/
+.venv-retina/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Secrets
+.env
+.env.*
+
+# Dataset and trained models
+data/
+models/
+*.keras
+*.h5
+*.pth
+*.pt
+
+# Generated outputs and temporary experiments
+outputs/
+quantum_experiment/
+archive_old_backups/
+backup_before_referable/
+
+# Logs
+*.log

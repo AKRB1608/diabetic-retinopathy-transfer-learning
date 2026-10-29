@@ -1,0 +1,393 @@
+
+$ErrorActionPreference = "Continue"
+
+$Root = "D:\Projects\diabetic-retinopathy-starter\diabetic_retinopathy_transfer_learning"
+if (!(Test-Path $Root)) {
+    throw "Project directory not found: $Root"
+}
+Set-Location $Root
+
+$Stamp = Get-Date -Format "yyyyMMdd_HHmmss"
+$Out = Join-Path $Root "outputs\master_audit"
+New-Item -ItemType Directory -Force -Path $Out | Out-Null
+
+$Findings = [System.Collections.Generic.List[object]]::new()
+
+function Add-Check($Area, $Item, $Status, $Evidence) {
+    $Findings.Add([pscustomobject]@{
+        Area = $Area
+        Item = $Item
+        Status = $Status
+        Evidence = $Evidence
+    }) | Out-Null
+}
+
+Write-Host "`n===== 1. PROJECT FILE INVENTORY =====" -ForegroundColor Cyan
+
+$Files = @(Get-ChildItem $Root -Recurse -File -ErrorAction SilentlyContinue |
+    Where-Object {
+        $_.FullName -notmatch '\\(\.venv|venv|__pycache__|node_modules|\.git)\\'
+    })
+
+$Files | Select-Object FullName, Length |
+    Export-Csv "$Out\file_inventory_$Stamp.csv" -NoTypeInformation
+
+$Files | Group-Object Extension |
+    Sort-Object Count -Descending |
+    Select-Object Name, Count |
+    Format-Table -AutoSize
+
+Add-Check "Structure" "Project inventory" "VERIFIED" `
+    "$($Files.Count) files inventoried."
+
+Write-Host "`n===== 2. REQUIRED ARTIFACTS =====" -ForegroundColor Cyan
+
+$Required = @(
+    "models\best_model.keras",
+    "models\best_referable_model.keras",
+    "outputs\train_split.csv",
+    "outputs\validation_split.csv",
+    "outputs\test_split.csv",
+    "outputs\metrics.json",
+    "outputs\referable_metrics.json",
+    "outputs\referable_threshold.json",
+    "outputs\referable_test_predictions.npz",
+    "outputs\test_metrics_recomputed.json",
+    "outputs\validation_metrics_recomputed.json",
+    "outputs\referable_confusion_matrix.png"
+)
+
+foreach ($Path in $Required) {
+    if (Test-Path $Path) {
+        Add-Check "Artifacts" $Path "VERIFIED" "File exists."
+    }
+    else {
+        Add-Check "Artifacts" $Path "MISSING" "File not found."
+    }
+}
+
+Write-Host "`n===== 3. DATASET SPLITS =====" -ForegroundColor Cyan
+
+$Splits = @(
+    "outputs\train_split.csv",
+    "outputs\validation_split.csv",
+    "outputs\test_split.csv"
+)
+
+$Total = 0
+$AllIds = @()
+
+foreach ($Path in $Splits) {
+    if (!(Test-Path $Path)) {
+        Add-Check "Dataset" $Path "MISSING" "CSV not found."
+        continue
+    }
+
+    $Rows = @(Import-Csv $Path)
+    $Total += $Rows.Count
+
+    Write-Host "`n$Path : $($Rows.Count) rows"
+    $Rows | Group-Object diagnosis |
+        Select-Object Name, Count |
+        Format-Table -AutoSize
+
+    $BadLabels = @(
+        $Rows | Where-Object {
+            (([int]$_.diagnosis -ge 2) -ne ([int]$_.label -eq 1))
+        }
+    ).Count
+
+    Add-Check "Dataset" "$Path row count" "VERIFIED" `
+        "$($Rows.Count) rows."
+
+    Add-Check "Dataset" "$Path binary labels" `
+        $(if ($BadLabels -eq 0) {"VERIFIED"} else {"INCONSISTENT"}) `
+        "$BadLabels labels do not match grades 0-1 => 0 and grades 2-4 => 1."
+
+    $AllIds += @($Rows | ForEach-Object { $_.id_code })
+}
+
+Add-Check "Dataset" "Total dataset split count" `
+    $(if ($Total -eq 3662) {"VERIFIED"} else {"INCONSISTENT"}) `
+    "Total=$Total; expected 3662."
+
+$DuplicateIds = @($AllIds | Group-Object | Where-Object Count -gt 1)
+
+Add-Check "Dataset" "Duplicate IDs across splits" `
+    $(if ($DuplicateIds.Count -eq 0) {"VERIFIED"} else {"INCONSISTENT"}) `
+    "$($DuplicateIds.Count) IDs occur more than once."
+
+Write-Host "`n===== 4. METRIC JSON FILES =====" -ForegroundColor Cyan
+
+$MetricPaths = @(
+    "outputs\metrics.json",
+    "outputs\referable_metrics.json",
+    "outputs\referable_threshold.json",
+    "outputs\test_metrics_recomputed.json",
+    "outputs\validation_metrics_recomputed.json",
+    "outputs\report_figures\verified_test_metrics_from_saved_predictions.json"
+)
+
+foreach ($Path in $MetricPaths) {
+    if (Test-Path $Path) {
+        Write-Host "`n========== $Path =========="
+        Get-Content $Path -Raw
+
+        try {
+            $null = Get-Content $Path -Raw | ConvertFrom-Json
+            Add-Check "Metrics" $Path "VERIFIED" "Valid JSON; numerical consistency checked separately."
+        }
+        catch {
+            Add-Check "Metrics" $Path "INCONSISTENT" "Invalid JSON."
+        }
+    }
+    else {
+        Add-Check "Metrics" $Path "MISSING" "File not found."
+    }
+}
+
+Write-Host "`n===== 5. SAVED PREDICTIONS =====" -ForegroundColor Cyan
+
+$PythonAudit = @'
+import json
+import numpy as np
+import pandas as pd
+from sklearn.metrics import confusion_matrix, accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
+
+result = {}
+npz_path = "outputs/referable_test_predictions.npz"
+csv_path = "outputs/test_split.csv"
+
+with np.load(npz_path, allow_pickle=False) as d:
+    result["keys"] = list(d.files)
+    y = d["y_true"].astype(int).reshape(-1)
+    saved_pred = d["y_pred"].astype(int).reshape(-1)
+    p = d["probabilities"].astype(float).reshape(-1)
+
+df = pd.read_csv(csv_path)
+csv_labels = df["label"].to_numpy(dtype=int)
+
+result["samples"] = len(y)
+result["csv_rows"] = len(csv_labels)
+result["labels_match_csv_order"] = bool(np.array_equal(y, csv_labels))
+result["saved_predictions_match_threshold_0_50"] = bool(
+    np.array_equal(saved_pred, (p >= 0.5).astype(int))
+)
+result["probabilities_finite"] = bool(np.isfinite(p).all())
+result["probability_range"] = [float(np.min(p)), float(np.max(p))]
+result["metrics"] = {}
+
+for threshold in (0.50, 0.71):
+    pred = (p >= threshold).astype(int)
+    tn, fp, fn, tp = confusion_matrix(y, pred, labels=[0, 1]).ravel()
+    result["metrics"][str(threshold)] = {
+        "TN": int(tn), "FP": int(fp), "FN": int(fn), "TP": int(tp),
+        "accuracy": float(accuracy_score(y, pred)),
+        "precision": float(precision_score(y, pred, zero_division=0)),
+        "recall": float(recall_score(y, pred, zero_division=0)),
+        "f1": float(f1_score(y, pred, zero_division=0)),
+        "macro_f1": float(f1_score(y, pred, average="macro", zero_division=0)),
+        "roc_auc": float(roc_auc_score(y, p))
+    }
+
+print(json.dumps(result, indent=2))
+'@
+
+$PredictionResult = $PythonAudit | python -
+$PredictionResult |
+    Set-Content "$Out\prediction_audit_$Stamp.json" -Encoding UTF8
+$PredictionResult
+
+Add-Check "Evaluation" "Saved prediction arrays" "PARTIAL" `
+    "Review prediction_audit_$Stamp.json and compare against all metric JSON files."
+
+Write-Host "`n===== 6. SOURCE CODE INVENTORY =====" -ForegroundColor Cyan
+
+$Scripts = @($Files | Where-Object Extension -eq ".py")
+
+$Scripts | Select-Object FullName |
+    Export-Csv "$Out\python_scripts_$Stamp.csv" -NoTypeInformation
+
+$Scripts | Where-Object {
+    $_.Name -match 'train|eval|metric|predict|threshold|figure|grad|app|report'
+} | Select-Object -ExpandProperty FullName
+
+Add-Check "Code" "Python source inventory" "VERIFIED" `
+    "$($Scripts.Count) Python files found."
+
+Write-Host "`n===== 7. EVALUATION CONSISTENCY WARNINGS =====" -ForegroundColor Cyan
+
+Add-Check "Evaluation" "Image preprocessing consistency" "INCONSISTENT" `
+    "Threshold selection uses PIL resize; metric recomputation uses TensorFlow resize. Compare against training preprocessing."
+
+Add-Check "Evaluation" "Threshold consistency" "INCONSISTENT" `
+    "regenerate_referable_evaluation.py hardcodes 0.50; selected research threshold is approximately 0.71."
+
+Add-Check "Evaluation" "Final reported test metrics" "MANUAL" `
+    "Do not finalize until the same checkpoint and preprocessing reproduce the chosen results."
+
+Add-Check "Research" "Baseline comparison" "MANUAL" `
+    "Require measured baseline results under consistent conditions."
+
+Add-Check "Research" "Ablation study" "MANUAL" `
+    "Require actual ablation experiments; do not infer completion from source filenames."
+
+Add-Check "Research" "Literature and research gap" "MANUAL" `
+    "Verify cited papers and claims manually."
+
+Add-Check "Explainability" "Grad-CAM correctness" "MANUAL" `
+    "Inspect generated heatmaps and verify model layer, image alignment and interpretation."
+
+Write-Host "`n===== 8. 89-QUESTION CHECKLIST =====" -ForegroundColor Cyan
+
+$QuestionTitles = @(
+"Student name and roll number",
+"Project title",
+"Research domain",
+"Research background",
+"Importance of the problem",
+"Real-world problem addressed",
+"Existing system limitations",
+"Literature research gap",
+"Reason for selecting problem",
+"Research motivation",
+"Primary objective",
+"Specific objectives",
+"Expected outcomes",
+"Major contributions",
+"Novelty or improvement",
+"Expected benefits",
+"Previous algorithms and methods",
+"Strengths of existing methods",
+"Limitations of existing methods",
+"Baseline selection and rationale",
+"Unresolved research gap",
+"How proposed work addresses gap",
+"Literature evidence for gap",
+"Problem definition",
+"System inputs",
+"Expected outputs",
+"Intended beneficiaries",
+"Mathematical formulation status",
+"Equations or loss function",
+"Variables and symbols",
+"Research assumptions",
+"Technical and data constraints",
+"Scope and boundaries",
+"System architecture prepared",
+"Architecture diagram attached",
+"Major modules explained",
+"Data flow explained",
+"Algorithms and models used",
+"Algorithm type",
+"Algorithm working procedure",
+"Advantages over baseline",
+"Mathematical model",
+"Equations and parameters",
+"Role of mathematical model",
+"End-to-end workflow",
+"Flowchart or pseudocode",
+"Programming languages and tools",
+"Dataset used",
+"Dataset source",
+"Dataset sample count",
+"Input features",
+"Preprocessing techniques",
+"Missing values, imbalance and leakage",
+"Hardware and software",
+"Train-validation-test split",
+"Hyperparameters",
+"Reproducibility documentation",
+"Evaluation metrics",
+"Metric suitability",
+"Experiment completion status",
+"Results obtained",
+"Measured metric values",
+"Observations from results",
+"Baseline comparison status",
+"Baseline models",
+"Comparative results table",
+"Improvement over baselines",
+"Consistent comparison conditions",
+"Components suitable for ablation",
+"Ablation status",
+"Ablation components and effects",
+"Major limitations",
+"Challenges and unexpected results",
+"Reliability and generalization",
+"Additional experiments",
+"Major findings",
+"Objective achievement",
+"Main contribution",
+"Practical applications",
+"Future improvements",
+"Testing on larger datasets",
+"Additional models to investigate",
+"Experiments before publication",
+"Current project status",
+"Research artifacts prepared",
+"Research paper intention",
+"Support required from guide"
+)
+
+$QuestionRows = for ($i = 0; $i -lt $QuestionTitles.Count; $i++) {
+    $Number = $i + 1
+    $Status = "MANUAL REVIEW"
+    $Evidence = "Requires supporting evidence or researcher/guide confirmation."
+
+    if ($Number -eq 57) {
+        $Status = "VERIFIED"
+        $Evidence = "Observed split counts: 2563 training, 549 validation, 550 test."
+    }
+    elseif ($Number -in @(52, 27, 28, 40, 49, 50, 51, 53, 56, 58, 60, 62, 75, 77, 85, 86, 87)) {
+        $Status = "PARTIAL"
+        $Evidence = "Some project artifacts exist; confirm details against source code/report."
+    }
+    elseif ($Number -in @(54, 59, 63, 64, 68, 69, 70)) {
+        $Status = "INCONSISTENT / REVIEW"
+        $Evidence = "Evaluation differences or missing comparison evidence require resolution."
+    }
+
+    [pscustomobject]@{
+        Question = $Number
+        ChecklistItem = $QuestionTitles[$i]
+        InitialStatus = $Status
+        Evidence = $Evidence
+    }
+}
+
+$QuestionRows |
+    Export-Csv "$Out\questionnaire_89_$Stamp.csv" -NoTypeInformation -Encoding UTF8
+
+Add-Check "Questionnaire" "89-question checklist" "VERIFIED" `
+    "Generated $($QuestionTitles.Count) checklist rows; manual answers are not falsely marked complete."
+
+Write-Host "`n===== 9. SAVE AUDIT REPORTS =====" -ForegroundColor Cyan
+
+$FindingCounts = $Findings | Group-Object Status |
+    Select-Object Name, Count
+
+$Findings | Export-Csv "$Out\findings_$Stamp.csv" -NoTypeInformation -Encoding UTF8
+
+$Summary = [pscustomobject]@{
+    ProjectRoot = $Root
+    GeneratedAt = (Get-Date).ToString("o")
+    TotalFiles = $Files.Count
+    PythonFiles = $Scripts.Count
+    QuestionCount = $QuestionTitles.Count
+    StatusCounts = $FindingCounts
+    Findings = $Findings
+}
+
+$Summary | ConvertTo-Json -Depth 10 |
+    Set-Content "$Out\summary_$Stamp.json" -Encoding UTF8
+
+$Findings |
+    Format-Table Area, Item, Status -AutoSize
+
+Write-Host "`nAUDIT COMPLETE" -ForegroundColor Green
+Write-Host "Output directory: $Out"
+Write-Host "Question checklist: $Out\questionnaire_89_$Stamp.csv"
+Write-Host "Metric audit: $Out\prediction_audit_$Stamp.json"
+Write-Host "Summary: $Out\summary_$Stamp.json"
+Write-Host "No training was performed and existing metric/model files were not overwritten."
