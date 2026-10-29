@@ -1,0 +1,28 @@
+{
+    "task":  "non_referable_grades_0_1_vs_referable_grades_2_4",
+    "test_samples":  550,
+    "threshold":  0.51000000000000012,
+    "accuracy":  0.921818181818182,
+    "balanced_accuracy":  0.92640665926139243,
+    "referable_precision":  0.86885245901639341,
+    "referable_recall":  0.95067264573991039,
+    "non_referable_specificity":  0.90214067278287458,
+    "referable_f1":  0.90792291220556742,
+    "macro_f1":  0.919996211237065,
+    "roc_auc":  0.9729296087546796,
+    "confusion_matrix":  [
+                             [
+                                 295,
+                                 32
+                             ],
+                             [
+                                 11,
+                                 212
+                             ]
+                         ],
+    "class_mapping":  {
+                          "0":  "Non-referable DR (grades 0-1)",
+                          "1":  "Referable DR (grades 2-4)"
+                      },
+    "source":  "final_consistent_evaluation; TensorFlow resizing; existing checkpoint"
+}
