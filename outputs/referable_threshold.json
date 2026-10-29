@@ -1,0 +1,22 @@
+{
+    "threshold":  0.51000000000000012,
+    "selection_method":  "maximum validation macro-F1; referable recall tie-break; consistent TensorFlow preprocessing",
+    "validation_samples":  549,
+    "validation_macro_f1":  0.92352851245986856,
+    "validation_referable_recall":  0.95067264573991039,
+    "validation_confusion_matrix":  [
+                                        [
+                                            296,
+                                            30
+                                        ],
+                                        [
+                                            11,
+                                            212
+                                        ]
+                                    ],
+    "class_mapping":  {
+                          "0":  "Non-referable DR (grades 0-1)",
+                          "1":  "Referable DR (grades 2-4)"
+                      },
+    "note":  "Research operating threshold selected on validation data; not a clinical cutoff."
+}
